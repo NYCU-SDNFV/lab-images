@@ -26,4 +26,6 @@ jobs:
             ghcr.io/nycu-sdnfv/lab-base:sha-${{ github.sha }}
           labels: org.opencontainers.image.source=https://github.com/NYCU-SDNFV/lab-images
       - name: image size
-        run: docker pull -q ghcr.io/nycu-sdnfv/lab-base:${{ env.TERM_TAG }} && docker image inspect ghcr.io/nycu-sdnfv/lab-base:${{ env.TERM_TAG }} --format '{{.Size}}' | awk '{printf "lab-base: %.0f MB\n",$1/1e6}'
+        run: |
+          docker pull -q ghcr.io/nycu-sdnfv/lab-base:${{ env.TERM_TAG }}
+          docker image inspect ghcr.io/nycu-sdnfv/lab-base:${{ env.TERM_TAG }} --format '{{.Size}}' | awk '{printf "lab-base size: %.0f MB\n", $1/1e6}'
