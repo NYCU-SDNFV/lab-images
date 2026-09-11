@@ -1,17 +1,17 @@
-name: lab-base multiarch test
+name: lab-base resource validation
 on:
   push:
-    branches: [multiarch-test]
+    branches: [resource-limits-fix]
     paths: ['base/**', 'tests/**', '.github/workflows/multiarch-test.yml']
 permissions:
   contents: read
   packages: write
 concurrency:
-  group: lab-base-multiarch-test
+  group: lab-base-resource-validation
   cancel-in-progress: false
 env:
   IMAGE: ghcr.io/nycu-sdnfv/lab-base
-  TEST_TAG: 115-1-multiarch-test
+  TEST_TAG: 115-1-resource-test
 jobs:
   build-test:
     name: native ${{ matrix.arch }}
@@ -46,16 +46,80 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/NYCU-SDNFV/lab-images
             org.opencontainers.image.revision=${{ github.sha }}
-      - name: Native image smoke test
+      - name: Native resource unit and integration tests
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
           docker pull "${IMAGE}@${DIGEST}"
           test "$(docker image inspect "${IMAGE}@${DIGEST}" --format '{{.Architecture}}')" = "${{ matrix.arch }}"
+          docker run --rm --entrypoint python3 \
+            --mount "type=bind,src=${GITHUB_WORKSPACE},dst=/src,readonly" \
+            "${IMAGE}@${DIGEST}" \
+            -m unittest discover -s /src/tests -p test_resources.py -v
+      - name: Reject an unprepared host without hiding the error
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # A deterministic invalid fixture, only on this disposable runner VM.
+          sudo sysctl -qw net.core.wmem_max=212992
+          if docker run --rm --privileged --ulimit nofile=65536:65536 \
+            --entrypoint python3 "${IMAGE}@${DIGEST}" \
+            -c 'from mininet.util import fixLimits; fixLimits()' \
+            > "${RUNNER_TEMP}/unprepared-host.log" 2>&1; then
+            cat "${RUNNER_TEMP}/unprepared-host.log"
+            echo "An unprepared host was incorrectly accepted" >&2
+            exit 1
+          fi
+          cat "${RUNNER_TEMP}/unprepared-host.log"
+          grep -F 'lab_resources.ResourceError:' "${RUNNER_TEMP}/unprepared-host.log"
+          grep -F 'net.core.wmem_max=212992' "${RUNNER_TEMP}/unprepared-host.log"
+          grep -F 'host-prepare --profile course' "${RUNNER_TEMP}/unprepared-host.log"
+      - name: Prepare and verify the Docker ENGINE host
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker run --rm --privileged --network host --entrypoint python3 \
+            "${IMAGE}@${DIGEST}" -m lab_resources host-prepare --profile course
+          docker run --rm --network host --entrypoint python3 \
+            "${IMAGE}@${DIGEST}" -m lab_resources host-verify --profile course
+          docker run --rm --network host --entrypoint python3 \
+            "${IMAGE}@${DIGEST}" -m lab_resources host-config --profile course \
+            > "${RUNNER_TEMP}/course-sysctl.conf"
+          sudo sysctl -n net.ipv4.tcp_rmem net.ipv4.tcp_wmem \
+            net.core.rmem_max net.core.wmem_max kernel.pty.max \
+            > "${RUNNER_TEMP}/host-limits.before"
+      - name: Native isolated image smoke test
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
           timeout 180s docker run --rm --privileged --ulimit nofile=65536:65536 \
             --mount "type=bind,src=${GITHUB_WORKSPACE}/tests,dst=/tests,readonly" \
-            "${IMAGE}@${DIGEST}" python3 -u /tests/smoke.py "${{ matrix.arch }}"
+            "${IMAGE}@${DIGEST}" python3 -u /tests/smoke.py "${{ matrix.arch }}" \
+            2>&1 | tee "${RUNNER_TEMP}/isolated-smoke.log"
+          if grep -Fq "Error setting resource limits" "${RUNNER_TEMP}/isolated-smoke.log"; then
+            echo "The original resource-limit warning remains" >&2
+            exit 1
+          fi
+          sudo sysctl -n net.ipv4.tcp_rmem net.ipv4.tcp_wmem \
+            net.core.rmem_max net.core.wmem_max kernel.pty.max \
+            > "${RUNNER_TEMP}/host-limits.after"
+          diff -u "${RUNNER_TEMP}/host-limits.before" "${RUNNER_TEMP}/host-limits.after"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resource-evidence-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/unprepared-host.log
+            ${{ runner.temp }}/course-sysctl.conf
+            ${{ runner.temp }}/isolated-smoke.log
+            ${{ runner.temp }}/host-limits.before
+            ${{ runner.temp }}/host-limits.after
+          if-no-files-found: warn
+          retention-days: 7
       - name: Export tested digest
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -101,8 +165,9 @@ jobs:
             | sort == ["amd64", "arm64"]' "${RUNNER_TEMP}/multiarch-manifest.json"
           {
             echo "## Published ${IMAGE}:${TEST_TAG}"
-            echo "Native amd64 and arm64 smoke tests passed for ${GITHUB_SHA}."
-            echo "The production 115-1 and latest tags are not updated by this workflow."
+            echo "Native amd64 and arm64 resource tests and isolated smoke passed for ${GITHUB_SHA}."
+            echo "Full Lab grading is a separate PVE validation; this workflow does not claim it."
+            echo "The production 115-1/latest and baseline 115-1-multiarch-test tags are not updated."
           } >> "${GITHUB_STEP_SUMMARY}"
       - uses: actions/upload-artifact@v4
         with:

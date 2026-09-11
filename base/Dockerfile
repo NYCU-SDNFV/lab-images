@@ -12,8 +12,11 @@ RUN apt-get update \
       iproute2 iputils-ping net-tools tcpdump iperf3 ethtool \
       python3 python3-matplotlib python3-os-ken procps psmisc ca-certificates \
  && rm -rf /var/lib/apt/lists/*
+COPY lab_resources.py patch_mininet.py /usr/local/share/lab-resources/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN python3 /usr/local/share/lab-resources/patch_mininet.py \
+ && python3 -c 'from mininet.util import fixLimits; from lab_resources import initialize_container' \
+ && chmod +x /usr/local/bin/entrypoint.sh
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["sleep", "infinity"]

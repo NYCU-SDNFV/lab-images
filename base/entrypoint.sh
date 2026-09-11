@@ -23,8 +23,8 @@ fi
 
 ovs-vsctl --no-wait init
 
-# ovs-vswitchd. We never load the openvswitch kernel module: every bridge in
-# this lab uses the userspace (netdev) datapath, so the module is not needed.
+# ovs-vswitchd. Kernel-datapath labs (including Lab 1) require the Docker host
+# to provide the openvswitch module; netdev labs do not. We do not load it here.
 if ! pidof ovs-vswitchd >/dev/null 2>&1; then
   ovs-vswitchd --pidfile --detach --log-file
 fi
