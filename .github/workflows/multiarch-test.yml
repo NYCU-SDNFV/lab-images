@@ -1,0 +1,112 @@
+name: lab-base multiarch test
+on:
+  push:
+    branches: [multiarch-test]
+    paths: ['base/**', 'tests/**', '.github/workflows/multiarch-test.yml']
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: lab-base-multiarch-test
+  cancel-in-progress: false
+env:
+  IMAGE: ghcr.io/nycu-sdnfv/lab-base
+  TEST_TAG: 115-1-multiarch-test
+jobs:
+  build-test:
+    name: native ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            machine: x86_64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            machine: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native runner
+        run: test "$(uname -m)" = "${{ matrix.machine }}"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: base
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          labels: |
+            org.opencontainers.image.source=https://github.com/NYCU-SDNFV/lab-images
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Native image smoke test
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}@${DIGEST}"
+          test "$(docker image inspect "${IMAGE}@${DIGEST}" --format '{{.Architecture}}')" = "${{ matrix.arch }}"
+          timeout 180s docker run --rm --privileged --ulimit nofile=65536:65536 \
+            --mount "type=bind,src=${GITHUB_WORKSPACE}/tests,dst=/tests,readonly" \
+            "${IMAGE}@${DIGEST}" python3 -u /tests/smoke.py "${{ matrix.arch }}"
+      - name: Export tested digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/digests"
+          printf '%s\n' "${DIGEST}" > "${RUNNER_TEMP}/digests/${{ matrix.arch }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-test-tag:
+    needs: build-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+      - name: Publish only the test tag
+        run: |
+          set -euo pipefail
+          sources=()
+          for arch in amd64 arm64; do
+            digest="$(cat "${RUNNER_TEMP}/digests/${arch}")"
+            [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+            sources+=("${IMAGE}@${digest}")
+          done
+          docker buildx imagetools create --tag "${IMAGE}:${TEST_TAG}" "${sources[@]}"
+          docker buildx imagetools inspect "${IMAGE}:${TEST_TAG}" --raw \
+            | tee "${RUNNER_TEMP}/multiarch-manifest.json"
+          jq -e '[.manifests[] | select(.platform.os == "linux") | .platform.architecture]
+            | sort == ["amd64", "arm64"]' "${RUNNER_TEMP}/multiarch-manifest.json"
+          {
+            echo "## Published ${IMAGE}:${TEST_TAG}"
+            echo "Native amd64 and arm64 smoke tests passed for ${GITHUB_SHA}."
+            echo "The production 115-1 and latest tags are not updated by this workflow."
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: multiarch-manifest
+          path: ${{ runner.temp }}/multiarch-manifest.json
+          if-no-files-found: error
+          retention-days: 7
