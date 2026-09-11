@@ -1,0 +1,50 @@
+name: diagnose Mininet resource limits
+on:
+  push:
+    branches: [resource-limit-diagnosis]
+    paths: ['diagnostics/**', '.github/workflows/resource-limits.yml']
+permissions:
+  contents: read
+env:
+  IMAGE: ghcr.io/nycu-sdnfv/lab-base@sha256:97984f882600608ec6ea169ec1c8ea1c04ef65c7375b15c52f0fe214b6cd323b
+jobs:
+  diagnose:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Diagnose isolated and host network initialization
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE}"
+          probe() {
+            local phase="$1" expected="$2"
+            shift 2
+            docker run --rm --privileged --ulimit nofile=65536:65536 \
+              --mount "type=bind,src=${GITHUB_WORKSPACE}/diagnostics,dst=/diagnostics,readonly" \
+              --entrypoint python3 "$@" "${IMAGE}" -u /diagnostics/resource_limits.py \
+              --phase "${phase}" --expect "${expected}" --architecture "${{ matrix.arch }}"
+          }
+          probe isolated-before warning
+          # These host sysctl writes affect only this disposable hosted-runner VM.
+          probe host-network clean --network host
+          probe isolated-after observe
+      - name: Verify unsuppressed host-network smoke
+        run: |
+          set -euo pipefail
+          timeout 180s docker run --rm --privileged --network host --ulimit nofile=65536:65536 \
+            --mount "type=bind,src=${GITHUB_WORKSPACE}/tests,dst=/tests,readonly" \
+            "${IMAGE}" python3 -u /tests/smoke.py "${{ matrix.arch }}" \
+            2>&1 | tee "${RUNNER_TEMP}/host-network-smoke.log"
+          if grep -Fq "Error setting resource limits" "${RUNNER_TEMP}/host-network-smoke.log"; then
+            echo "Mininet still reports a resource-limit failure" >&2
+            exit 1
+          fi
