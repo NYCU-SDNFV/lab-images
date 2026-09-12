@@ -261,7 +261,7 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(limits.values["RLIMIT_NPROC"], (8192, 8192))
         self.assertEqual(limits.values["RLIMIT_NOFILE"], (16384, 16384))
 
-    def test_preserves_unlimited_soft_and_hard_limits(self):
+    def test_preserves_unlimited_nproc_and_existing_hard_limits(self):
         for name, minimum in resources.PROCESS_MINIMUMS.items():
             for initial, expected in (
                 ((-1, -1), (-1, -1)),
@@ -270,10 +270,25 @@ class ContainerTests(unittest.TestCase):
                 ((minimum * 2, minimum * 4), (minimum * 2, minimum * 4)),
                 ((1024, minimum * 4), (minimum, minimum * 4)),
             ):
+                if name == "RLIMIT_NOFILE" and expected[0] == -1:
+                    expected = (resources.MININET_NOFILE_SOFT_MAX, expected[1])
                 with self.subTest(name=name, initial=initial):
                     limits = MemoryLimits(**{name: initial})
                     resources.initialize_container(MemorySysctl(container_values()), limits)
                     self.assertEqual(limits.values[name], expected)
+
+    def test_bounds_huge_nofile_soft_limit_without_lowering_hard_limit(self):
+        limits = MemoryLimits(RLIMIT_NOFILE=(1073741816, 1073741816))
+        resources.initialize_container(MemorySysctl(container_values()), limits)
+        self.assertEqual(limits.values["RLIMIT_NOFILE"], (65536, 1073741816))
+        self.assertEqual(limits.values["RLIMIT_NPROC"], (-1, -1))
+        self.assertEqual(limits.calls, [("RLIMIT_NOFILE", (65536, 1073741816))])
+
+    def test_nofile_cap_readback_failure_is_not_silenced(self):
+        limits = MemoryLimits(RLIMIT_NOFILE=(1073741816, 1073741816))
+        limits.ignore_writes = True
+        with self.assertRaisesRegex(resources.ResourceError, "requires <= 65536"):
+            resources.initialize_container(MemorySysctl(container_values()), limits)
 
     def test_larger_tcp_tunables_are_never_lowered(self):
         values = container_values()

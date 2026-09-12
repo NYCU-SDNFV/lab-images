@@ -87,6 +87,10 @@ docker run --rm --privileged --ulimit nofile=65536:65536 \
 至至少 8192、`RLIMIT_NOFILE` 至至少 16384，**保留 unlimited nproc／hard limits**。
 執行慣例仍為 `--ulimit nofile=65536:65536`，不會提高到約十億；`mnexec -c`
 會逐個掃描 file descriptors，不能靠巨大 nofile「修正」警告。
+為了支援沒有顯式設定 ulimit 的 Lab 0，initializer 也會將 **Mininet 程序自身**
+過大或 unlimited 的 nofile **soft limit 限到 65536**，不降低 hard limit、
+不更動 Docker daemon 或其他 image 程序的限制。這解決 Debian Docker 繼承
+1073741816 導致 `mnexec -c`／拓撲啟動逾時的問題，而非放寬 grader timeout。
 僅寫入目前 network namespace 的 `net.ipv4.tcp_rmem`、`tcp_wmem`，各分量至少為
 `10240 87380 16777216`，既有較大分量不下降。失敗會拋出具名 `ResourceError`，
 不吞例外、不遮蔽 logger，也沒有 `sitecustomize`／no-op patch。

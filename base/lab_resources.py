@@ -33,6 +33,7 @@ TCP_MINIMUMS = {
     "net.ipv4.tcp_wmem": (10240, 87380, 16777216),
 }
 PROCESS_MINIMUMS = {"RLIMIT_NPROC": 8192, "RLIMIT_NOFILE": 16384}
+MININET_NOFILE_SOFT_MAX = 65536
 
 HOST_ADVICE = (
     "Run python3 -m lab_resources host-prepare --profile course explicitly "
@@ -173,17 +174,28 @@ def _raise_process_limits(limits):
         try:
             limit = getattr(limits, name)
             soft, hard = limits.getrlimit(limit)
-            # RLIM_INFINITY is commonly -1, not a small finite limit.
-            if soft == limits.RLIM_INFINITY or soft >= minimum:
+            new_soft = (
+                soft if soft == limits.RLIM_INFINITY else max(soft, minimum)
+            )
+            if name == "RLIMIT_NOFILE":
+                # mnexec -c scans the soft limit, including unused descriptors.
+                new_soft = (
+                    MININET_NOFILE_SOFT_MAX
+                    if new_soft == limits.RLIM_INFINITY
+                    else min(new_soft, MININET_NOFILE_SOFT_MAX)
+                )
+            if new_soft == soft and (
+                hard == limits.RLIM_INFINITY or hard >= minimum
+            ):
                 continue
             new_hard = (
                 hard if hard == limits.RLIM_INFINITY or hard >= minimum else minimum
             )
-            limits.setrlimit(limit, (minimum, new_hard))
+            limits.setrlimit(limit, (new_soft, new_hard))
             actual_soft, actual_hard = limits.getrlimit(limit)
         except (OSError, ValueError) as error:
             raise ResourceError(
-                f"{name}: cannot raise resource limit: {error}. {advice}"
+                f"{name}: cannot configure resource limit: {error}. {advice}"
             ) from error
         if any(
             value != limits.RLIM_INFINITY and value < minimum
@@ -192,6 +204,14 @@ def _raise_process_limits(limits):
             raise ResourceError(
                 f"{name}: read back {(actual_soft, actual_hard)}, "
                 f"requires >= {minimum}. {advice}"
+            )
+        if name == "RLIMIT_NOFILE" and (
+            actual_soft == limits.RLIM_INFINITY
+            or actual_soft > MININET_NOFILE_SOFT_MAX
+        ):
+            raise ResourceError(
+                f"{name}: read back soft limit {actual_soft}, "
+                f"requires <= {MININET_NOFILE_SOFT_MAX} for mnexec. {advice}"
             )
 
 

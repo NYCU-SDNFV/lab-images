@@ -1,5 +1,6 @@
 import io
 import json
+import resource
 import subprocess
 import sys
 import time
@@ -58,6 +59,10 @@ def main():
         autoSetMacs=True, build=False,
     )
     try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft == resource.RLIM_INFINITY or soft > 65536:
+            raise RuntimeError(f"Mininet retained an unsafe nofile soft limit: {soft}")
+        print("MININET_NOFILE", json.dumps({"soft": soft, "hard": hard}), flush=True)
         net.build()
         net.start()
         if run("ovs-vsctl", "get", "Bridge", "s1", "datapath_type") != "netdev":
