@@ -126,3 +126,36 @@ docker pull ghcr.io/nycu-sdnfv/lab-base:115-1-resource-test
 Docker 會自動選擇 host 對應的架構，不需強制 `--platform=linux/amd64`。
 macOS 的 Linux VM 是否具備 OVS kernel datapath、netem、BBR 等功能仍須另外驗證；
 multiarch image 不提供 host kernel modules。apt 未鎖版本，測試 image 的套件也可能比正式版新。
+
+## 已驗證範圍（2026-09-12）
+
+以下結果對應 source `2647b11604ec81728ee35251a464a27890f0b3fc` 與
+`115-1-resource-test` 的 immutable index：
+
+```text
+sha256:c9b6ee4a5271038225a7ca41f541fd005e3766abf4bd70f9f924a61e24984a19
+```
+
+在 PVE 的 Debian 13 Linux amd64 VM（kernel `6.12.107+deb13-cloud-amd64`，
+Docker 26.1.5，4 vCPU／8 GiB）完成 course host preparation 後，以同一顆 candidate
+跑固定版本的 instructor key／canonical bundle，沒有修改 protected Lab 檔案或放寬 timeout：
+
+| 現有 Lab | Canonical grade | Checks |
+|---|---:|---:|
+| Lab 0 — Toolchain | 100/100 | 8/8 |
+| Lab 1 — Measurement | 100/100 | 12/12 |
+| Lab 2 — Controller | 100/100 | 16/16 |
+
+三個 Lab image 都核對了 candidate 的完整 rootfs-layer prefix，且維持獨立 network
+namespace（Lab 1 原本的 `pid: host` 保留）。70 份實跑 logs 中，原始 Mininet
+`Error setting resource limits` 為零；沒有宣稱其他 HTB／Python／controller diagnostics 也為零。
+另通過 95＋8 項相關 regressions、B2 三輪，以及 host-only checkpoint A–E；checkpoint
+不是 image 相容性證明，非 canonical 的舊 reference scripts 也不在上述滿分聲明內。
+
+[原生 amd64／ARM64 CI](https://github.com/NYCU-SDNFV/lab-images/actions/runs/34660285965)
+各通過 31 項 resource tests 與 high-nofile isolated smoke。PVE 上也已驗證負向錯誤、
+host preparation 冪等、真實 reboot 後的持久化，以及沒有顯式 ulimit 的 Docker
+將 Mininet soft limit 從 1073741816 限到 65536、保留原 hard limit。
+
+**完整 Lab grading 僅驗證 Linux amd64**，不能推廣為完整 ARM64／macOS 驗收。
+Lab 3／4 尚無可驗收的完整實作與 grader，未列為通過；所有正式 image tags 仍未升級。
