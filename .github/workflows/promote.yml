@@ -1,0 +1,108 @@
+name: promote verified lab-base
+on:
+  push:
+    branches: [release-115-1]
+    paths: ['.github/workflows/promote.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: lab-base-production-promotion
+  cancel-in-progress: false
+env:
+  IMAGE: ghcr.io/nycu-sdnfv/lab-base
+  TERM_TAG: "115-1"
+  APPROVED_DIGEST: sha256:c9b6ee4a5271038225a7ca41f541fd005e3766abf4bd70f9f924a61e24984a19
+  APPROVED_SOURCE: 2647b11604ec81728ee35251a464a27890f0b3fc
+  APPROVED_RUN: "34660285965"
+  PREVIOUS_DIGEST: sha256:2aaaa13592f840f8187c9a8228b1c953c1510dab0052118b79f26a783133a1bf
+  ROLLBACK_TAG: sha-4fb871db97e383c6cf370e0caeaf6855586ba2c4
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-buildx-action@v3
+      - name: Verify unchanged runtime and successful native evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git diff --exit-code "${APPROVED_SOURCE}" -- base tests
+          gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${APPROVED_RUN}" \
+            > "${RUNNER_TEMP}/approved-run.json"
+          jq -e --arg source "${APPROVED_SOURCE}" \
+            '.conclusion == "success" and .head_sha == $source
+             and .path == ".github/workflows/multiarch-test.yml"' \
+            "${RUNNER_TEMP}/approved-run.json"
+      - name: Verify exact multiarch image and retained rollback
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "${IMAGE}@${APPROVED_DIGEST}" \
+            --format '{{json .Manifest}}' > "${RUNNER_TEMP}/approved-manifest.json"
+          jq -e --arg digest "${APPROVED_DIGEST}" \
+            '.digest == $digest and
+             ([.manifests[] | select(.platform.os == "linux") | .platform.architecture]
+              | sort == ["amd64", "arm64"])' "${RUNNER_TEMP}/approved-manifest.json"
+          rollback="$(docker buildx imagetools inspect "${IMAGE}:${ROLLBACK_TAG}" \
+            --format '{{json .Manifest}}' | jq -er '.digest')"
+          test "${rollback}" = "${PREVIOUS_DIGEST}"
+          docker buildx imagetools create --dry-run --prefer-index=false \
+            --tag "${IMAGE}:${TERM_TAG}" --tag "${IMAGE}:latest" \
+            "${IMAGE}@${APPROVED_DIGEST}" > "${RUNNER_TEMP}/promotion-dry-run.json"
+          jq -e '[.manifests[] | select(.platform.os == "linux") | .platform.architecture]
+            | sort == ["amd64", "arm64"]' "${RUNNER_TEMP}/promotion-dry-run.json"
+
+  promote:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Guard existing production tags
+        run: |
+          set -euo pipefail
+          for tag in "${TERM_TAG}" latest; do
+            current="$(docker buildx imagetools inspect "${IMAGE}:${tag}" \
+              --format '{{json .Manifest}}' | jq -er '.digest')"
+            if [[ "${current}" != "${PREVIOUS_DIGEST}" && "${current}" != "${APPROVED_DIGEST}" ]]; then
+              echo "Refusing to overwrite unexpected ${tag} digest: ${current}" >&2
+              exit 1
+            fi
+          done
+      - name: Copy approved manifest without rebuilding
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false \
+            --tag "${IMAGE}:${TERM_TAG}" --tag "${IMAGE}:latest" \
+            "${IMAGE}@${APPROVED_DIGEST}"
+          for tag in "${TERM_TAG}" latest; do
+            actual="$(docker buildx imagetools inspect "${IMAGE}:${tag}" \
+              --format '{{json .Manifest}}' | jq -er '.digest')"
+            test "${actual}" = "${APPROVED_DIGEST}"
+          done
+          docker pull "${IMAGE}:${TERM_TAG}"
+          docker run --rm --entrypoint python3 "${IMAGE}:${TERM_TAG}" \
+            -c 'import lab_resources; from mininet.util import fixLimits; print("Published resource API imports successfully")'
+          {
+            echo "## Released ${IMAGE}:${TERM_TAG} and latest"
+            echo "Exact tested digest: ${APPROVED_DIGEST}"
+            echo "Runtime source: ${APPROVED_SOURCE}; native validation run: ${APPROVED_RUN}"
+            echo "Rollback retained at ${IMAGE}:${ROLLBACK_TAG} (${PREVIOUS_DIGEST})."
+            echo "No image was rebuilt or kernel/host setting changed by this promotion."
+          } >> "${GITHUB_STEP_SUMMARY}"

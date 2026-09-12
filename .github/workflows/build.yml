@@ -1,31 +1,12 @@
-name: build & push images
+name: build and validate candidate images
 on:
   push:
     branches: [main]
-    paths: ['base/**', 'lab4/**', '.github/workflows/build.yml']
+    paths: ['base/**', 'tests/**', '.github/workflows/build.yml', '.github/workflows/multiarch-test.yml']
   workflow_dispatch:
 permissions:
   contents: read
   packages: write
-env:
-  TERM_TAG: "115-1"
 jobs:
-  base:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/login-action@v3
-        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
-      - uses: docker/build-push-action@v6
-        with:
-          context: base
-          push: true
-          tags: |
-            ghcr.io/nycu-sdnfv/lab-base:${{ env.TERM_TAG }}
-            ghcr.io/nycu-sdnfv/lab-base:latest
-            ghcr.io/nycu-sdnfv/lab-base:sha-${{ github.sha }}
-          labels: org.opencontainers.image.source=https://github.com/NYCU-SDNFV/lab-images
-      - name: image size
-        run: |
-          docker pull -q ghcr.io/nycu-sdnfv/lab-base:${{ env.TERM_TAG }}
-          docker image inspect ghcr.io/nycu-sdnfv/lab-base:${{ env.TERM_TAG }} --format '{{.Size}}' | awk '{printf "lab-base size: %.0f MB\n", $1/1e6}'
+  candidate:
+    uses: ./.github/workflows/multiarch-test.yml

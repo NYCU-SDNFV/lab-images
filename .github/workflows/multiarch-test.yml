@@ -1,5 +1,6 @@
 name: lab-base resource validation
 on:
+  workflow_call:
   push:
     branches: [resource-limits-fix]
     paths: ['base/**', 'tests/**', '.github/workflows/multiarch-test.yml']
@@ -7,11 +8,11 @@ permissions:
   contents: read
   packages: write
 concurrency:
-  group: lab-base-resource-validation
+  group: lab-base-resource-validation-${{ github.ref }}
   cancel-in-progress: false
 env:
   IMAGE: ghcr.io/nycu-sdnfv/lab-base
-  TEST_TAG: 115-1-resource-test
+  TEST_TAG: ${{ github.ref == 'refs/heads/main' && format('sha-{0}', github.sha) || '115-1-resource-test' }}
 jobs:
   build-test:
     name: native ${{ matrix.arch }}

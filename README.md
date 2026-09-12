@@ -11,7 +11,22 @@ SDNFV lab 的容器基底，由 Actions 建好推到 GHCR（public package，pul
 ```dockerfile
 FROM ghcr.io/nycu-sdnfv/lab-base:115-1
 ```
-每學期換一次 tag；改了 `base/` push 到 main 會自動重建。
+每學期換一次 tag。`main` 上的變更會建置並驗證雙架構 `sha-<commit>` 候選，
+**不會自動覆寫學期 tag 或 `latest`**；正式版本透過下方的 promotion 流程發布。
+
+## 正式 image 發布
+
+[promotion workflow](.github/workflows/promote.yml) 僅允許從 `main` 手動執行。
+它檢查已核准的 native CI、runtime source、雙架構 manifest 與保留的 rollback，
+再將已經實測的 digest 原樣標記為 `115-1`／`latest`，不重建 image。
+`release-115-1` branch 的 push 只會跑驗證與 dry-run，不會發布正式 tag。
+
+目前核准的 immutable digest 為
+`sha256:c9b6ee4a5271038225a7ca41f541fd005e3766abf4bd70f9f924a61e24984a19`；
+是否已完成正式發布，應以 promotion workflow 成功與 registry digest 為準。
+舊 amd64 image 保留於 `sha-4fb871db97e383c6cf370e0caeaf6855586ba2c4`，
+digest `sha256:2aaaa13592f840f8187c9a8228b1c953c1510dab0052118b79f26a783133a1bf`。
+候選升級前仍需完整 Lab 驗收，不能只依賴 image smoke。
 
 ## Mininet resources：host 準備與 container 初始化分離
 
@@ -117,6 +132,8 @@ ghcr.io/nycu-sdnfv/lab-base:115-1-resource-test
 OVS netdev + Mininet 雙 host 的 ping 與 TCP 傳輸。不是效能 benchmark，也不代表完整 Lab 評分已通過。
 `115-1`、`latest` 與先前的 `115-1-multiarch-test` baseline 不由此 workflow 更新。
 既有學生 repo 不在此 branch 修改；候選 image 必須配合前面的 host preparation。
+`main` 的 build workflow 重用同一套 native 驗證，但只發布 `sha-<commit>` 候選，
+不會把剛建好的候選直接升為正式版。
 
 ```sh
 docker buildx imagetools inspect ghcr.io/nycu-sdnfv/lab-base:115-1-resource-test
