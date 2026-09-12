@@ -1,178 +1,94 @@
-# lab-images
+# SDNFV Lab Images
 
-SDNFV lab 的容器基底，由 Actions 建好推到 GHCR（public package，pull 免費）。
+Linux container images for the SDNFV networking labs.
 
-| image | 內容 | 用途 |
-|---|---|---|
-| `ghcr.io/nycu-sdnfv/lab-base:115-1` | ubuntu 24.04 + Mininet + OVS + FRR + iperf3/tc/ethtool/tcpdump | Lab 0~3 |
-| `ghcr.io/nycu-sdnfv/lab4:115-1` | lab-base + BMv2 + p4c + clang/libbpf | Lab 4（待建）|
+The shared base image includes Ubuntu 24.04, Mininet, Open vSwitch, FRRouting,
+os-ken, iperf3, iproute2, ethtool, tcpdump, and matplotlib.
 
-學生 repo 的 `Dockerfile` 只需：
-```dockerfile
-FROM ghcr.io/nycu-sdnfv/lab-base:115-1
-```
-每學期換一次 tag。`main` 上的變更會建置並驗證雙架構 `sha-<commit>` 候選，
-**不會自動覆寫學期 tag 或 `latest`**；正式版本透過下方的 promotion 流程發布。
+## Images
 
-## 正式 image 發布
+| Image | Platforms | Status |
+| --- | --- | --- |
+| `ghcr.io/nycu-sdnfv/lab-base:115-1` | `linux/amd64` | Current release |
+| `ghcr.io/nycu-sdnfv/lab-base:115-1-resource-test` | `linux/amd64`, `linux/arm64` | Preview with container-aware resource setup |
 
-[promotion workflow](.github/workflows/promote.yml) 僅允許從 `main` 手動執行。
-它檢查已核准的 native CI、runtime source、雙架構 manifest 與保留的 rollback，
-再將已經實測的 digest 原樣標記為 `115-1`／`latest`，不重建 image。
-`release-115-1` branch 的 push 只會跑驗證與 dry-run，不會發布正式 tag。
+The setup instructions below apply to the preview image.
 
-目前核准的 immutable digest 為
-`sha256:c9b6ee4a5271038225a7ca41f541fd005e3766abf4bd70f9f924a61e24984a19`；
-是否已完成正式發布，應以 promotion workflow 成功與 registry digest 為準。
-舊 amd64 image 保留於 `sha-4fb871db97e383c6cf370e0caeaf6855586ba2c4`，
-digest `sha256:2aaaa13592f840f8187c9a8228b1c953c1510dab0052118b79f26a783133a1bf`。
-候選升級前仍需完整 Lab 驗收，不能只依賴 image smoke。
+## Requirements
 
-## Mininet resources：host 準備與 container 初始化分離
+- Docker Engine running on a Linux machine or VM.
+- Docker Compose for lab repositories that use it.
+- Administrator access to prepare the Docker host.
+- Host kernel support for the networking features required by your lab.
 
-Ubuntu 24.04 的 Mininet 2.3.0 將所有 resource 設定包在同一個 catch；
-isolated Docker 不能寫 host buffer ceilings，也看不到 backlog／neighbour GC 等 host-only
-sysctl。這個 image 在 **build 時只替換 `mininet.util.fixLimits()` 的函式本體**，
-保留無參數、回傳 `None` 的 API，改呼叫 `lab_resources.initialize_container()`。
-完整 upstream 函式 AST 必須符合已檢查的 2.3.0 結構，否則 build 失敗，不能靜默套錯 patch。
+Containers share the Docker host's kernel; installing an image does not add
+kernel modules. Kernel-datapath labs require Open vSwitch support, and some
+measurement labs also require netem and BBR.
 
-### 一次性、明確 opt-in 的 Docker ENGINE host 準備
-
-以下指令要針對 **實際執行 Docker daemon 的 Linux host／VM**，不是 Docker client、
-PVE hypervisor 或筆電的 macOS／Windows kernel。只有短命的管理 helper 使用 `--network host`；
-**一般 Lab container 保持預設的獨立 network namespace**。entrypoint 不切換 namespace、
-不呼叫 host-prep，也不修改 host sysctl。
+## Quick start
 
 ```sh
 IMAGE=ghcr.io/nycu-sdnfv/lab-base:115-1-resource-test
-# 唯一會改 host tunables 的動作；需 host 管理者同意。
+docker pull "$IMAGE"
+```
+
+### 1. Prepare the Docker host
+
+Run these commands on the Linux machine or VM running the Docker daemon.
+If you use a remote Docker context, prepare the remote host, not the client.
+
+**Host preparation changes system-wide resource limits. Run it only on a
+machine you administer.** It raises settings that are below the course
+requirements, including the 64 MiB socket-buffer ceilings, without reducing
+existing larger values.
+
+```sh
 docker run --rm --privileged --network host --entrypoint python3 "$IMAGE" \
   -m lab_resources host-prepare --profile course
-# Read-only：請在建立 Lab container 前完成，不能拿 container check 取代。
+
 docker run --rm --network host --entrypoint python3 "$IMAGE" \
   -m lab_resources host-verify --profile course
 ```
 
-`course` profile 的 host 最低值如下；prepare **先讀取／驗證所有必要 knob 才開始寫入**，
-只提高低於門檻的整數、保留更大的既有值，並檢查寫入後的值。缺少必要 knob、讀取／寫入
-被拒絕或數值不合法均會列出參數與補救方式並失敗；寫入階段若失敗，先前提高的值不會 rollback，
-修正權限／環境後可重跑。不可用的 kernel 不能以略過必要設定假裝完成。
+The second command is read-only. If verification fails, it identifies the
+missing or insufficient setting.
 
-| Host sysctl | Course 最低值 | Container 行為 |
-|---|---:|---|
-| `fs.file-max` | 10000 | 只驗證，不寫 |
-| `net.core.wmem_max`、`net.core.rmem_max` | **67108864** | 只驗證，不寫；Lab 1 需要 64 MiB，16 MiB 不算就緒 |
-| `net.core.netdev_max_backlog` | 5000 | 不存取；由 host helper 驗證 |
-| `net.ipv4.neigh.default.gc_thresh1/2/3` | 4096／8192／16384 | 不存取；由 host helper 驗證 |
-| `kernel.pty.max` | 20000 | 只驗證，不寫 |
-| `net.ipv4.route.max_size` | 32768（若存在） | 不存取；Linux 3.6 起的 obsolete IPv4 route-cache knob，只有 **ENOENT** 可明確列為 unavailable legacy |
+### 2. Keep the settings after reboot
 
-Lab 1 Makefile 原有的 root-netns buffer 設定仍相容，但不足以取代完整 host preparation。
-`route.max_size` 存在卻讀寫失敗仍是錯誤；backlog／GC 缺失不是「legacy 可略過」。
-
-### 重開機後持續生效
-
-在 **Docker ENGINE host 的 shell** 產生並安裝設定（不是在遠端 Docker client 的 `/etc`）：
+On the Docker host, generate and install a sysctl configuration:
 
 ```sh
-# 先完整取得成功輸出，避免 helper 失敗時截斷既有設定檔。
 config="$(docker run --rm --network host --entrypoint python3 "$IMAGE" \
   -m lab_resources host-config --profile course)" &&
 printf '%s\n' "$config" | sudo tee /etc/sysctl.d/90-sdnfv-labs.conf >/dev/null
 ```
 
-`host-config` 不寫 sysctl；輸出的是 `max(目前值, course 最低值)`，保留產生當下的較大設定，
-明列並省略不存在的 legacy knob。Linux host 的 sysctl.d loader 會於開機套用。
-這是 **snapshot，不是永遠單調的 loader**：之後若手動調高、換 kernel，應重新產生；
-不要用舊 snapshot 覆寫較新的 tuning。檢查其他 sysctl.d 檔案的覆寫順序，重開機後再次執行
-`host-verify --profile course`。立即套用請用上面的 monotonic `host-prepare`，而非載入舊檔。
-Docker Desktop 的 VM 持久化方式由該平台管理，不能將 client 的設定檔視為 VM 已設定。
+Regenerate this file after changing host tuning or kernels, and run
+`host-verify --profile course` again after a reboot.
 
-### Container 端驗證
+### 3. Check container initialization
 
 ```sh
-# 刻意不加 --network host；不需啟動 OVS 即可驗證 Mininet 實際入口。
-docker run --rm --privileged --ulimit nofile=65536:65536 \
-  --entrypoint python3 "$IMAGE" \
-  -c 'from mininet.util import fixLimits; fixLimits(); print("Container resource initialization verified")'
+docker run --rm --privileged --entrypoint python3 "$IMAGE" \
+  -c 'from mininet.util import fixLimits; fixLimits(); print("Resource checks passed")'
 ```
 
-`fixLimits()` 先驗證 container 可讀的 host prerequisites；任一 buffer 仍是 212992 或
-16777216 都會明確失敗，不會嘗試在 container 修 host。接著保留／提高 `RLIMIT_NPROC`
-至至少 8192、`RLIMIT_NOFILE` 至至少 16384，**保留 unlimited nproc／hard limits**。
-執行慣例仍為 `--ulimit nofile=65536:65536`，不會提高到約十億；`mnexec -c`
-會逐個掃描 file descriptors，不能靠巨大 nofile「修正」警告。
-為了支援沒有顯式設定 ulimit 的 Lab 0，initializer 也會將 **Mininet 程序自身**
-過大或 unlimited 的 nofile **soft limit 限到 65536**，不降低 hard limit、
-不更動 Docker daemon 或其他 image 程序的限制。這解決 Debian Docker 繼承
-1073741816 導致 `mnexec -c`／拓撲啟動逾時的問題，而非放寬 grader timeout。
-僅寫入目前 network namespace 的 `net.ipv4.tcp_rmem`、`tcp_wmem`，各分量至少為
-`10240 87380 16777216`，既有較大分量不下降。失敗會拋出具名 `ResourceError`，
-不吞例外、不遮蔽 logger，也沒有 `sitecustomize`／no-op patch。
+Keep normal lab containers network-isolated. Only the host preparation and
+verification helpers use `--network host`.
 
-此 container check **不能證明不可見的 backlog／GC 已準備好**，仍需前面的 host-verify。
-Focused tests（stdlib `unittest`；除已安裝 Mininet 的整合測試外可跨平台跑）：
+For an existing assignment, follow its repository's setup instructions rather
+than editing a supplied Dockerfile or Compose file.
+
+## Compatibility
+
+- Use native images for network measurements; CPU emulation can distort results.
+- Full course-lab validation currently covers Linux amd64. ARM64 builds have
+  resource and basic networking checks; lab-specific kernel requirements still apply.
+- Docker Desktop on macOS or Windows has not been validated for this setup.
+  A Linux VM running Docker Engine is the supported environment.
+
+## Build locally
 
 ```sh
-python3 -m unittest discover -s tests -p 'test_resources.py' -v
+docker build -t sdnfv-lab-base:local base
 ```
-
-## Multiarch 測試（不更換正式 tag）
-
-`resource-limits-fix` branch 的 [獨立 workflow](.github/workflows/multiarch-test.yml)
-在原生 `ubuntu-24.04`（amd64）與 `ubuntu-24.04-arm`（arm64）runner 分別建置。
-兩邊的 resource 單元／整合測試、未準備 host 的失敗案例、host preparation，
-以及 isolated [smoke test](tests/smoke.py) 都通過後，才合併並發布：
-
-```text
-ghcr.io/nycu-sdnfv/lab-base:115-1-resource-test
-```
-
-驗證範圍：image 架構、OVS/FRR/量測工具啟動、os-ken import、matplotlib 繪圖、
-OVS netdev + Mininet 雙 host 的 ping 與 TCP 傳輸。不是效能 benchmark，也不代表完整 Lab 評分已通過。
-`115-1`、`latest` 與先前的 `115-1-multiarch-test` baseline 不由此 workflow 更新。
-既有學生 repo 不在此 branch 修改；候選 image 必須配合前面的 host preparation。
-`main` 的 build workflow 重用同一套 native 驗證，但只發布 `sha-<commit>` 候選，
-不會把剛建好的候選直接升為正式版。
-
-```sh
-docker buildx imagetools inspect ghcr.io/nycu-sdnfv/lab-base:115-1-resource-test
-docker pull ghcr.io/nycu-sdnfv/lab-base:115-1-resource-test
-```
-
-Docker 會自動選擇 host 對應的架構，不需強制 `--platform=linux/amd64`。
-macOS 的 Linux VM 是否具備 OVS kernel datapath、netem、BBR 等功能仍須另外驗證；
-multiarch image 不提供 host kernel modules。apt 未鎖版本，測試 image 的套件也可能比正式版新。
-
-## 已驗證範圍（2026-09-12）
-
-以下結果對應 source `2647b11604ec81728ee35251a464a27890f0b3fc` 與
-`115-1-resource-test` 的 immutable index：
-
-```text
-sha256:c9b6ee4a5271038225a7ca41f541fd005e3766abf4bd70f9f924a61e24984a19
-```
-
-在 PVE 的 Debian 13 Linux amd64 VM（kernel `6.12.107+deb13-cloud-amd64`，
-Docker 26.1.5，4 vCPU／8 GiB）完成 course host preparation 後，以同一顆 candidate
-跑固定版本的 instructor key／canonical bundle，沒有修改 protected Lab 檔案或放寬 timeout：
-
-| 現有 Lab | Canonical grade | Checks |
-|---|---:|---:|
-| Lab 0 — Toolchain | 100/100 | 8/8 |
-| Lab 1 — Measurement | 100/100 | 12/12 |
-| Lab 2 — Controller | 100/100 | 16/16 |
-
-三個 Lab image 都核對了 candidate 的完整 rootfs-layer prefix，且維持獨立 network
-namespace（Lab 1 原本的 `pid: host` 保留）。70 份實跑 logs 中，原始 Mininet
-`Error setting resource limits` 為零；沒有宣稱其他 HTB／Python／controller diagnostics 也為零。
-另通過 95＋8 項相關 regressions、B2 三輪，以及 host-only checkpoint A–E；checkpoint
-不是 image 相容性證明，非 canonical 的舊 reference scripts 也不在上述滿分聲明內。
-
-[原生 amd64／ARM64 CI](https://github.com/NYCU-SDNFV/lab-images/actions/runs/34660285965)
-各通過 31 項 resource tests 與 high-nofile isolated smoke。PVE 上也已驗證負向錯誤、
-host preparation 冪等、真實 reboot 後的持久化，以及沒有顯式 ulimit 的 Docker
-將 Mininet soft limit 從 1073741816 限到 65536、保留原 hard limit。
-
-**完整 Lab grading 僅驗證 Linux amd64**，不能推廣為完整 ARM64／macOS 驗收。
-Lab 3／4 尚無可驗收的完整實作與 grader，未列為通過；所有正式 image tags 仍未升級。
