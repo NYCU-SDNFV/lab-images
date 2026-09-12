@@ -7,12 +7,12 @@ os-ken, iperf3, iproute2, ethtool, tcpdump, and matplotlib.
 
 ## Images
 
-| Image | Platforms | Status |
-| --- | --- | --- |
-| `ghcr.io/nycu-sdnfv/lab-base:115-1` | `linux/amd64` | Current release |
-| `ghcr.io/nycu-sdnfv/lab-base:115-1-resource-test` | `linux/amd64`, `linux/arm64` | Preview with container-aware resource setup |
+| Image | Platforms |
+| --- | --- |
+| `ghcr.io/nycu-sdnfv/lab-base:115-1` | `linux/amd64`, `linux/arm64` |
 
-The setup instructions below apply to the preview image.
+`latest` currently points to the same release. Use the semester tag specified
+by your lab instructions.
 
 ## Requirements
 
@@ -28,7 +28,7 @@ measurement labs also require netem and BBR.
 ## Quick start
 
 ```sh
-IMAGE=ghcr.io/nycu-sdnfv/lab-base:115-1-resource-test
+IMAGE=ghcr.io/nycu-sdnfv/lab-base:115-1
 docker pull "$IMAGE"
 ```
 
