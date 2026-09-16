@@ -76,6 +76,9 @@ def container_values():
         name: str(value) for name, value in resources.CONTAINER_HOST_MINIMUMS.items()
     }
     values.update({
+        name: str(value) for name, value in resources.CONTAINER_LOCAL_MINIMUMS.items()
+    })
+    values.update({
         "net.ipv4.tcp_rmem": "4096 131072 6291456",
         "net.ipv4.tcp_wmem": "4096 16384 4194304",
     })
@@ -248,12 +251,68 @@ class ContainerTests(unittest.TestCase):
         self.assertEqual(sysctl.values["net.ipv4.tcp_wmem"], "10240 87380 16777216")
         accessed = {event[1] for event in sysctl.events}
         self.assertEqual(
-            accessed, resources.CONTAINER_HOST_MINIMUMS.keys() | resources.TCP_MINIMUMS.keys()
+            accessed,
+            resources.CONTAINER_HOST_MINIMUMS.keys()
+            | resources.CONTAINER_LOCAL_MINIMUMS.keys()
+            | resources.TCP_MINIMUMS.keys(),
         )
         self.assertEqual({name for name, _ in sysctl.writes}, set(resources.TCP_MINIMUMS))
         self.assertEqual(limits.calls, [])
         self.assertEqual(limits.values["RLIMIT_NPROC"], (-1, -1))
         self.assertEqual(limits.values["RLIMIT_NOFILE"], (65536, 65536))
+
+    def test_raises_low_socket_buffer_ceilings_in_this_namespace(self):
+        values = container_values()
+        for name in resources.CONTAINER_LOCAL_MINIMUMS:
+            values[name] = "4096"
+        sysctl = MemorySysctl(values)
+        resources.initialize_container(sysctl, MemoryLimits())
+        for name, minimum in resources.CONTAINER_LOCAL_MINIMUMS.items():
+            self.assertEqual(sysctl.values[name], str(minimum))
+        self.assertEqual(
+            {name for name, _ in sysctl.writes} & resources.CONTAINER_LOCAL_MINIMUMS.keys(),
+            set(resources.CONTAINER_LOCAL_MINIMUMS),
+        )
+
+    def test_local_socket_buffer_ceilings_are_never_lowered(self):
+        values = container_values()
+        for name, minimum in resources.CONTAINER_LOCAL_MINIMUMS.items():
+            values[name] = str(minimum * 2)
+        sysctl = MemorySysctl(values)
+        resources.initialize_container(sysctl, MemoryLimits())
+        for name, minimum in resources.CONTAINER_LOCAL_MINIMUMS.items():
+            self.assertEqual(sysctl.values[name], str(minimum * 2))
+        self.assertEqual(
+            {name for name, _ in sysctl.writes} & resources.CONTAINER_LOCAL_MINIMUMS.keys(),
+            set(),
+        )
+
+    def test_already_sufficient_socket_buffers_are_not_rewritten(self):
+        values = container_values()
+        for name, minimum in resources.CONTAINER_LOCAL_MINIMUMS.items():
+            values[name] = str(minimum)
+        sysctl = MemorySysctl(values)
+        sysctl.write_errors.update(
+            {name: PermissionError("read-only") for name in resources.CONTAINER_LOCAL_MINIMUMS}
+        )
+        resources.initialize_container(sysctl, MemoryLimits())
+        self.assertEqual(
+            {name for name, _ in sysctl.writes} & resources.CONTAINER_LOCAL_MINIMUMS.keys(),
+            set(),
+        )
+
+    def test_denied_local_socket_buffer_write_explains_the_read_only_kernel_case(self):
+        for name in resources.CONTAINER_LOCAL_MINIMUMS:
+            with self.subTest(name=name):
+                values = container_values()
+                values[name] = "4096"
+                sysctl = MemorySysctl(values)
+                sysctl.write_errors[name] = PermissionError("denied")
+                with self.assertRaises(resources.ResourceError) as caught:
+                    resources.initialize_container(sysctl, MemoryLimits())
+                self.assertIn(f"{name}: cannot write", str(caught.exception))
+                self.assertIn("host-prepare", str(caught.exception))
+                self.assertIn("recreate this container", str(caught.exception))
 
     def test_raises_small_finite_soft_and_hard_limits(self):
         limits = MemoryLimits(RLIMIT_NPROC=(1024, 2048), RLIMIT_NOFILE=(4096, 8192))
@@ -312,17 +371,14 @@ class ContainerTests(unittest.TestCase):
                 self.assertEqual(sysctl.writes, [])
                 self.assertEqual(limits.calls, [])
 
-    def test_16_mib_or_default_host_buffers_do_not_satisfy_course_profile(self):
+    def test_16_mib_or_default_socket_buffers_are_raised_not_rejected(self):
         for name in ("net.core.wmem_max", "net.core.rmem_max"):
             for value in ("212992", "16777216"):
                 with self.subTest(name=name, value=value):
                     sysctl = MemorySysctl(container_values())
                     sysctl.values[name] = value
-                    with self.assertRaises(resources.ResourceError) as caught:
-                        resources.initialize_container(sysctl, MemoryLimits())
-                    self.assertIn(f"{name}={value}", str(caught.exception))
-                    self.assertIn("67108864", str(caught.exception))
-                    self.assertEqual(sysctl.writes, [])
+                    resources.initialize_container(sysctl, MemoryLimits())
+                    self.assertEqual(sysctl.values[name], "67108864")
 
     def test_missing_visible_prerequisites_are_not_silently_skipped(self):
         for name in resources.CONTAINER_HOST_MINIMUMS:
