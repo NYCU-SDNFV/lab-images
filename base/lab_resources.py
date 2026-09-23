@@ -23,10 +23,10 @@ OPTIONAL_LEGACY = {
 }
 # Backlog, neighbour GC, and the legacy route knob are not visible in lab netns.
 CONTAINER_HOST_MINIMUMS = {
-    name: HOST_MINIMUMS[name]
-    for name in (
-        "fs.file-max", "net.core.wmem_max", "net.core.rmem_max", "kernel.pty.max"
-    )
+    name: HOST_MINIMUMS[name] for name in ("fs.file-max", "kernel.pty.max")
+}
+CONTAINER_LOCAL_MINIMUMS = {
+    name: HOST_MINIMUMS[name] for name in ("net.core.wmem_max", "net.core.rmem_max")
 }
 TCP_MINIMUMS = {
     "net.ipv4.tcp_rmem": (10240, 87380, 16777216),
@@ -45,6 +45,17 @@ HOST_ADVICE = (
 LOCAL_ADVICE = (
     "Use a privileged, network-isolated lab container with writable "
     "/proc/sys/net/ipv4. Do not use --network host for normal labs."
+)
+SOCKET_BUFFER_ADVICE = (
+    ""
+    "This container's own copy is read-only and already too low. Two "
+    "kernels behave differently here: some let a privileged container raise "
+    "its own copy directly; others fix it read-only at container-creation "
+    "time from whatever the engine host held then. If this container was "
+    "created before the engine host was prepared, run "
+    "python3 -m lab_resources host-prepare --profile course on the Docker "
+    "ENGINE host (--privileged --network host) and recreate this container "
+    "-- do not add --network host to normal lab containers."
 )
 
 
@@ -216,11 +227,13 @@ def _raise_process_limits(limits):
 
 
 def initialize_container(sysctl=None, limits=None):
-    """Mininet fixLimits implementation: check host ceilings; adjust local state."""
+    """Mininet fixLimits implementation: verify host ceilings; raise local state."""
     if sysctl is None:
         sysctl = Sysctl()
     values = _snapshot(sysctl, CONTAINER_HOST_MINIMUMS)
     _require_minimums(values, CONTAINER_HOST_MINIMUMS)
+    for name, minimum in CONTAINER_LOCAL_MINIMUMS.items():
+        _raise_sysctl(sysctl, name, (minimum,), SOCKET_BUFFER_ADVICE)
     if limits is None:
         import resource as limits
     _raise_process_limits(limits)
